@@ -37,15 +37,24 @@ if not api_key:
 @st.cache_resource
 def get_groq_client():
     try:
+        # Simple initialization without extra parameters
         client = Groq(api_key=api_key)
-        # Test the connection
-        client.models.list()
         return client
     except Exception as e:
         st.error(f"❌ Failed to initialize Groq client: {e}")
+        st.error(f"💡 Try upgrading: pip install --upgrade groq")
         st.stop()
 
 client = get_groq_client()
+
+# Test connection on first load
+if 'groq_tested' not in st.session_state:
+    try:
+        client.models.list()
+        st.session_state.groq_tested = True
+    except Exception as e:
+        st.error(f"❌ Connection test failed: {e}")
+        st.stop()
 
 # ---------------------------
 # Persona Context (Abinesh)
