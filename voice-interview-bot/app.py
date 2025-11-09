@@ -37,13 +37,29 @@ if not api_key:
 @st.cache_resource
 def get_groq_client():
     try:
-        # Simple initialization without extra parameters
-        client = Groq(api_key=api_key)
+        # Initialize with minimal parameters to avoid compatibility issues
+        import httpx
+        
+        # Create a custom HTTP client without proxies
+        http_client = httpx.Client(
+            timeout=30.0,
+            follow_redirects=True
+        )
+        
+        client = Groq(
+            api_key=api_key,
+            http_client=http_client
+        )
         return client
     except Exception as e:
-        st.error(f"❌ Failed to initialize Groq client: {e}")
-        st.error(f"💡 Try upgrading: pip install --upgrade groq")
-        st.stop()
+        # Fallback to simple initialization
+        try:
+            client = Groq(api_key=api_key)
+            return client
+        except Exception as e2:
+            st.error(f"❌ Failed to initialize Groq client: {e2}")
+            st.error(f"💡 Original error: {e}")
+            st.stop()
 
 client = get_groq_client()
 
