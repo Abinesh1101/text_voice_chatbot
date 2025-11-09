@@ -269,8 +269,8 @@ with st.sidebar:
         "How do you push limits?"
     ]
     
-    for q in sample_questions:
-        if st.button(f"💡 {q}", key=f"sample_{q[:10]}"):
+    for idx, q in enumerate(sample_questions):
+        if st.button(f"💡 {q}", key=f"sample_btn_{idx}"):
             process_and_respond(q)
     
     if st.button("🔄 Clear History"):
