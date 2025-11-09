@@ -1,13 +1,15 @@
 import streamlit as st
 from groq import Groq
 import os
+import base64
+from io import BytesIO
 
 # ---------------------------
 # Page Configuration
 # ---------------------------
 st.set_page_config(
-    page_title="Abinesh AI Interview Bot",
-    page_icon="🤖",
+    page_title="Abinesh AI Voice Interview Bot",
+    page_icon="🎙️",
     layout="centered"
 )
 
@@ -15,20 +17,14 @@ st.set_page_config(
 # Get API key from Streamlit secrets or environment
 # ---------------------------
 try:
-    # For Streamlit Cloud deployment
     api_key = st.secrets["GROQ_API_KEY"]
 except:
-    # For local development
     from dotenv import load_dotenv
     load_dotenv()
     api_key = os.getenv("GROQ_API_KEY")
 
-# ---------------------------
-# Verify API key
-# ---------------------------
 if not api_key:
-    st.error("⚠️ GROQ_API_KEY not found! Please add it to Streamlit secrets or .env file.")
-    st.info("📝 For Streamlit Cloud: Go to App Settings → Secrets → Add your GROQ_API_KEY")
+    st.error("⚠️ GROQ_API_KEY not found! Please add it to Streamlit secrets.")
     st.stop()
 
 # ---------------------------
@@ -37,40 +33,13 @@ if not api_key:
 @st.cache_resource
 def get_groq_client():
     try:
-        # Initialize with minimal parameters to avoid compatibility issues
-        import httpx
-        
-        # Create a custom HTTP client without proxies
-        http_client = httpx.Client(
-            timeout=30.0,
-            follow_redirects=True
-        )
-        
-        client = Groq(
-            api_key=api_key,
-            http_client=http_client
-        )
+        client = Groq(api_key=api_key)
         return client
     except Exception as e:
-        # Fallback to simple initialization
-        try:
-            client = Groq(api_key=api_key)
-            return client
-        except Exception as e2:
-            st.error(f"❌ Failed to initialize Groq client: {e2}")
-            st.error(f"💡 Original error: {e}")
-            st.stop()
+        st.error(f"❌ Failed to initialize Groq client: {e}")
+        st.stop()
 
 client = get_groq_client()
-
-# Test connection on first load
-if 'groq_tested' not in st.session_state:
-    try:
-        client.models.list()
-        st.session_state.groq_tested = True
-    except Exception as e:
-        st.error(f"❌ Connection test failed: {e}")
-        st.stop()
 
 # ---------------------------
 # Persona Context (Abinesh)
@@ -97,8 +66,15 @@ and share your experiences and perspectives as Abinesh — not as an assistant.
 2. Build scalable backend systems for deploying AI models
 3. Improve mentoring and technical communication
 
+**Key Interview Responses:**
+- Life story: Mathematics grad turned Data Scientist, passionate about making AI practical and accessible
+- Superpower: Fast learning and focused execution - I can quickly grasp new concepts and implement them
+- Growth areas: (1) Generative AI mastery, (2) Scalable backend systems, (3) Technical communication
+- Misconception: People think I'm quiet, but I'm actively listening and processing ideas before contributing
+- Pushing boundaries: I take on projects slightly beyond my current skill level to force growth
+
 Answer every question as if you're personally sharing your journey, insights, or mindset.
-Keep responses conversational, confident, and authentic.
+Keep responses conversational, confident, and authentic. Keep answers concise (2-3 sentences) unless asked for detail.
 """
 
 # ---------------------------
@@ -106,30 +82,158 @@ Keep responses conversational, confident, and authentic.
 # ---------------------------
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
+if 'audio_response' not in st.session_state:
+    st.session_state.audio_response = None
+
+# ---------------------------
+# Helper Functions
+# ---------------------------
+def transcribe_audio(audio_file):
+    """Transcribe audio using Groq Whisper API"""
+    try:
+        transcription = client.audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3",
+            response_format="text"
+        )
+        return transcription
+    except Exception as e:
+        st.error(f"❌ Transcription error: {e}")
+        return None
+
+def generate_response(user_input):
+    """Generate text response using Groq"""
+    try:
+        chat_completion = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": abinesh_persona},
+                {"role": "user", "content": user_input}
+            ],
+            temperature=0.7,
+            max_tokens=512
+        )
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        st.error(f"❌ Response generation error: {e}")
+        return None
+
+def text_to_speech_html(text):
+    """Generate HTML with JavaScript for text-to-speech"""
+    # Clean text for speech
+    clean_text = text.replace('"', "'").replace('\n', ' ')
+    
+    html_code = f"""
+    <div style="margin: 20px 0;">
+        <button onclick="speakText()" style="
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 12px 24px;
+            text-align: center;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        ">
+            🔊 Play Voice Response
+        </button>
+        <button onclick="stopSpeech()" style="
+            background-color: #f44336;
+            border: none;
+            color: white;
+            padding: 12px 24px;
+            text-align: center;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 8px;
+            margin-left: 10px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        ">
+            ⏹️ Stop
+        </button>
+    </div>
+    
+    <script>
+        let utterance = null;
+        
+        function speakText() {{
+            if ('speechSynthesis' in window) {{
+                // Stop any ongoing speech
+                window.speechSynthesis.cancel();
+                
+                utterance = new SpeechSynthesisUtterance("{clean_text}");
+                utterance.rate = 0.9;
+                utterance.pitch = 1.0;
+                utterance.volume = 1.0;
+                
+                // Try to use a natural voice
+                const voices = window.speechSynthesis.getVoices();
+                const preferredVoice = voices.find(voice => 
+                    voice.lang.startsWith('en') && 
+                    (voice.name.includes('Google') || voice.name.includes('Microsoft'))
+                );
+                if (preferredVoice) {{
+                    utterance.voice = preferredVoice;
+                }}
+                
+                window.speechSynthesis.speak(utterance);
+            }} else {{
+                alert('Text-to-speech is not supported in your browser.');
+            }}
+        }}
+        
+        function stopSpeech() {{
+            if ('speechSynthesis' in window) {{
+                window.speechSynthesis.cancel();
+            }}
+        }}
+        
+        // Load voices
+        if ('speechSynthesis' in window) {{
+            window.speechSynthesis.getVoices();
+        }}
+    </script>
+    """
+    return html_code
 
 # ---------------------------
 # Streamlit App UI
 # ---------------------------
-st.title("🤖 AI Interview Bot – Abinesh Sankaranarayanan")
-st.markdown("### Ask me about my background, skills, or experiences!")
+st.title("🎙️ AI Voice Interview Bot")
+st.markdown("### Meet Abinesh Sankaranarayanan - AI/ML Engineer")
+st.markdown("*Ask me anything about my background, skills, and experiences!*")
 st.markdown("---")
 
-# Sidebar information
+# Sidebar
 with st.sidebar:
-    st.success("✅ Connected to Groq API")
-    st.markdown("### About Me")
+    st.success("✅ Voice Bot Active")
+    st.markdown("### 👤 About Me")
     st.info("""
     **Abinesh Sankaranarayanan**
     
-    📊 Data Scientist & AI Enthusiast
+    📊 Data Scientist & AI Engineer
     
     🎓 MSc Data Science (VIT)
     
-    🔧 Specialized in:
-    - Generative AI
+    🔧 Expertise:
+    - Generative AI & LLMs
     - LangChain & FastAPI
-    - Power BI
+    - Power BI & Analytics
     - Machine Learning
+    
+    🚀 Currently building intelligent AI systems at GVW
+    """)
+    
+    st.markdown("### 🎤 How to Use")
+    st.markdown("""
+    1. **Upload Audio**: Record your question and upload
+    2. **Or Type**: Type your question directly
+    3. **Listen**: Click play to hear my response
     """)
     
     if st.button("🔄 Clear Conversation"):
@@ -137,54 +241,88 @@ with st.sidebar:
         st.rerun()
 
 # ---------------------------
-# Chat Interface
+# Input Methods
 # ---------------------------
-# Display conversation history
-for i, convo in enumerate(st.session_state.conversation_history):
-    with st.chat_message("user"):
-        st.write(convo['question'])
-    with st.chat_message("assistant"):
-        st.write(convo['answer'])
+col1, col2 = st.columns([1, 1])
 
-# User input
-user_input = st.chat_input("Type your question here...")
+with col1:
+    st.markdown("#### 🎤 Voice Input")
+    audio_file = st.file_uploader(
+        "Upload your audio question (WAV, MP3, M4A, OGG)",
+        type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
+        help="Record your question using your phone or computer and upload it here"
+    )
+
+with col2:
+    st.markdown("#### ⌨️ Text Input")
+    text_input = st.text_input(
+        "Or type your question:",
+        placeholder="e.g., What's your superpower?",
+        label_visibility="collapsed"
+    )
+
+# ---------------------------
+# Process Input
+# ---------------------------
+user_question = None
+
+if audio_file is not None:
+    st.audio(audio_file, format='audio/wav')
+    
+    if st.button("🎯 Transcribe & Answer", type="primary"):
+        with st.spinner("🎧 Listening to your question..."):
+            # Transcribe audio
+            transcribed_text = transcribe_audio(audio_file)
+            
+            if transcribed_text:
+                user_question = transcribed_text
+                st.success(f"📝 You asked: *{transcribed_text}*")
+
+elif text_input:
+    if st.button("💬 Get Answer", type="primary"):
+        user_question = text_input
 
 # ---------------------------
 # Generate Response
 # ---------------------------
-if user_input:
-    # Display user message
-    with st.chat_message("user"):
-        st.write(user_input)
+if user_question:
+    with st.spinner("🤔 Thinking..."):
+        response = generate_response(user_question)
+        
+        if response:
+            # Save to history
+            st.session_state.conversation_history.append({
+                "question": user_question,
+                "answer": response
+            })
+            
+            # Display response
+            st.markdown("---")
+            st.markdown("### 💬 Response:")
+            st.markdown(f"**Q:** {user_question}")
+            st.markdown(f"**A:** {response}")
+            
+            # Add text-to-speech
+            st.markdown("### 🔊 Voice Response:")
+            st.components.v1.html(text_to_speech_html(response), height=100)
+
+# ---------------------------
+# Conversation History
+# ---------------------------
+if st.session_state.conversation_history:
+    st.markdown("---")
+    st.markdown("### 📜 Conversation History")
     
-    # Generate and display assistant response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            try:
-                chat_completion = client.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=[
-                        {"role": "system", "content": abinesh_persona},
-                        {"role": "user", "content": user_input}
-                    ],
-                    temperature=0.7,
-                    max_tokens=1024
-                )
-                response = chat_completion.choices[0].message.content
-                st.write(response)
-                
-                # Update conversation history
-                st.session_state.conversation_history.append({
-                    "question": user_input,
-                    "answer": response
-                })
-                
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-                st.info("💡 Please check your API key and try again.")
+    for i, convo in enumerate(reversed(st.session_state.conversation_history[-5:]), 1):
+        with st.expander(f"💬 Question {len(st.session_state.conversation_history) - i + 1}: {convo['question'][:60]}..."):
+            st.markdown(f"**Q:** {convo['question']}")
+            st.markdown(f"**A:** {convo['answer']}")
+            # Add play button for history items too
+            st.components.v1.html(text_to_speech_html(convo['answer']), height=100)
 
 # ---------------------------
 # Footer
 # ---------------------------
 st.markdown("---")
-st.caption("Built by Abinesh Sankaranarayanan • Powered by Groq API & Streamlit")
+st.caption("🚀 Built by Abinesh Sankaranarayanan | Powered by Groq API (Whisper + Llama 3.1)")
+st.caption("💡 Tip: Use your phone's voice recorder to create audio files, then upload here!")
