@@ -1,7 +1,6 @@
 import streamlit as st
 from groq import Groq
 import os
-import base64
 from io import BytesIO
 
 # ---------------------------
@@ -12,6 +11,15 @@ st.set_page_config(
     page_icon="🎙️",
     layout="centered"
 )
+
+# Install audio recorder component (add to requirements.txt)
+# pip install audio-recorder-streamlit
+try:
+    from audio_recorder_streamlit import audio_recorder
+    AUDIO_RECORDER_AVAILABLE = True
+except ImportError:
+    AUDIO_RECORDER_AVAILABLE = False
+    st.warning("⚠️ For voice recording, install: `pip install audio-recorder-streamlit`")
 
 # ---------------------------
 # Get API key
@@ -77,12 +85,31 @@ Keep responses conversational, confident, and authentic. Keep answers concise (2
 # ---------------------------
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
+if 'last_audio_bytes' not in st.session_state:
+    st.session_state.last_audio_bytes = None
 
 # ---------------------------
 # Helper Functions
 # ---------------------------
-def transcribe_audio(audio_file):
-    """Transcribe audio using Groq Whisper API"""
+def transcribe_audio_bytes(audio_bytes):
+    """Transcribe audio bytes using Groq Whisper API"""
+    try:
+        # Create a file-like object from bytes
+        audio_file = BytesIO(audio_bytes)
+        audio_file.name = "recording.wav"
+        
+        transcription = client.audio.transcriptions.create(
+            file=audio_file,
+            model="whisper-large-v3",
+            response_format="text"
+        )
+        return transcription
+    except Exception as e:
+        st.error(f"❌ Transcription error: {e}")
+        return None
+
+def transcribe_audio_file(audio_file):
+    """Transcribe uploaded audio file using Groq Whisper API"""
     try:
         transcription = client.audio.transcriptions.create(
             file=audio_file,
@@ -113,7 +140,7 @@ def generate_response(user_input):
 
 def text_to_speech_html(text, auto_play=False):
     """Generate HTML with JavaScript for text-to-speech"""
-    clean_text = text.replace('"', "'").replace('\n', ' ').replace('`', '')
+    clean_text = text.replace('"', "'").replace('\n', ' ').replace('`', '').replace('\\', '')
     auto_play_script = "setTimeout(speakText, 800);" if auto_play else ""
     
     html_code = f"""
@@ -122,24 +149,26 @@ def text_to_speech_html(text, auto_play=False):
             background-color: #4CAF50;
             border: none;
             color: white;
-            padding: 10px 20px;
+            padding: 12px 24px;
             font-size: 16px;
             cursor: pointer;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            font-weight: 600;
         ">
-            🔊 Play Response
+            🔊 Play Voice Response
         </button>
         <button onclick="stopSpeech()" style="
             background-color: #f44336;
             border: none;
             color: white;
-            padding: 10px 20px;
+            padding: 12px 24px;
             font-size: 16px;
             cursor: pointer;
             border-radius: 8px;
             margin-left: 10px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            font-weight: 600;
         ">
             ⏹️ Stop
         </button>
@@ -153,14 +182,14 @@ def text_to_speech_html(text, auto_play=False):
                 window.speechSynthesis.cancel();
                 
                 utterance = new SpeechSynthesisUtterance("{clean_text}");
-                utterance.rate = 0.9;
+                utterance.rate = 0.95;
                 utterance.pitch = 1.0;
                 utterance.volume = 1.0;
                 
                 const voices = window.speechSynthesis.getVoices();
                 const preferredVoice = voices.find(voice => 
                     voice.lang.startsWith('en') && 
-                    (voice.name.includes('Google') || voice.name.includes('Microsoft'))
+                    (voice.name.includes('Google') || voice.name.includes('Microsoft') || voice.name.includes('Natural'))
                 );
                 if (preferredVoice) {{
                     utterance.voice = preferredVoice;
@@ -185,113 +214,27 @@ def text_to_speech_html(text, auto_play=False):
     """
     return html_code
 
-def get_voice_recorder_html():
-    """Simple in-browser voice recorder"""
-    return """
-    <div style="padding: 25px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                border-radius: 15px; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
-        <h3 style="color: white; margin-bottom: 20px;">🎤 Voice Recording</h3>
+def process_and_respond(question_text):
+    """Process question and generate response"""
+    with st.spinner("🤔 Generating response..."):
+        response = generate_response(question_text)
         
-        <button id="recordBtn" onclick="toggleRecording()" style="
-            background-color: #ff4b4b;
-            border: none;
-            color: white;
-            padding: 18px 40px;
-            font-size: 18px;
-            font-weight: bold;
-            cursor: pointer;
-            border-radius: 50px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-            transition: all 0.3s;
-        ">
-            <span id="recordIcon">🎙️</span>
-            <span id="recordText">Start Recording</span>
-        </button>
-        
-        <div id="status" style="color: white; margin-top: 15px; font-size: 16px;">
-            Click to start speaking
-        </div>
-        
-        <div id="timer" style="color: white; font-size: 28px; font-weight: bold; 
-                                  margin-top: 10px; font-family: monospace;">
-        </div>
-    </div>
-    
-    <script>
-        let mediaRecorder;
-        let audioChunks = [];
-        let isRecording = false;
-        let timer;
-        let seconds = 0;
-        
-        function toggleRecording() {
-            if (!isRecording) {
-                startRecording();
-            } else {
-                stopRecording();
-            }
-        }
-        
-        async function startRecording() {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                mediaRecorder = new MediaRecorder(stream);
-                audioChunks = [];
-                
-                mediaRecorder.ondataavailable = (event) => {
-                    audioChunks.push(event.data);
-                };
-                
-                mediaRecorder.onstop = () => {
-                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
-                    const reader = new FileReader();
-                    reader.readAsDataURL(audioBlob);
-                    reader.onloadend = () => {
-                        window.parent.postMessage({
-                            type: 'streamlit:setComponentValue',
-                            value: reader.result
-                        }, '*');
-                    };
-                };
-                
-                mediaRecorder.start();
-                isRecording = true;
-                seconds = 0;
-                
-                document.getElementById('recordBtn').style.backgroundColor = '#4CAF50';
-                document.getElementById('recordIcon').textContent = '⏹️';
-                document.getElementById('recordText').textContent = 'Stop Recording';
-                document.getElementById('status').textContent = '🔴 Recording...';
-                
-                timer = setInterval(() => {
-                    seconds++;
-                    const mins = Math.floor(seconds / 60);
-                    const secs = seconds % 60;
-                    document.getElementById('timer').textContent = 
-                        `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-                }, 1000);
-                
-            } catch (err) {
-                document.getElementById('status').textContent = '❌ Microphone access denied';
-                console.error(err);
-            }
-        }
-        
-        function stopRecording() {
-            if (mediaRecorder && isRecording) {
-                mediaRecorder.stop();
-                mediaRecorder.stream.getTracks().forEach(track => track.stop());
-                isRecording = false;
-                clearInterval(timer);
-                
-                document.getElementById('recordBtn').style.backgroundColor = '#ff4b4b';
-                document.getElementById('recordIcon').textContent = '🎙️';
-                document.getElementById('recordText').textContent = 'Start Recording';
-                document.getElementById('status').textContent = '✅ Processing your audio...';
-            }
-        }
-    </script>
-    """
+        if response:
+            # Save to history
+            st.session_state.conversation_history.append({
+                "question": question_text,
+                "answer": response
+            })
+            
+            # Show text response
+            st.markdown("---")
+            st.markdown("### 💬 Text Response:")
+            st.success(response)
+            
+            # Voice response (auto-play)
+            st.markdown("### 🔊 Voice Response:")
+            st.info("🎵 Voice will play automatically in a moment...")
+            st.components.v1.html(text_to_speech_html(response, auto_play=True), height=100)
 
 # ---------------------------
 # Main UI
@@ -318,13 +261,17 @@ with st.sidebar:
     """)
     
     st.markdown("### 📝 Sample Questions")
-    st.markdown("""
-    - What's your life story?
-    - What's your superpower?
-    - Top 3 growth areas?
-    - Misconceptions about you?
-    - How do you push limits?
-    """)
+    sample_questions = [
+        "What's your life story?",
+        "What's your superpower?",
+        "Top 3 growth areas?",
+        "Misconceptions about you?",
+        "How do you push limits?"
+    ]
+    
+    for q in sample_questions:
+        if st.button(f"💡 {q}", key=f"sample_{q[:10]}"):
+            process_and_respond(q)
     
     if st.button("🔄 Clear History"):
         st.session_state.conversation_history = []
@@ -335,85 +282,81 @@ with st.sidebar:
 # ---------------------------
 st.markdown("## 🎯 Ask Your Question")
 
-# Voice Input
-st.markdown("### 🎤 Option 1: Speak Your Question")
-voice_data = st.components.v1.html(get_voice_recorder_html(), height=250)
-
-st.markdown("**OR upload audio file:**")
-audio_file = st.file_uploader("Upload audio", type=['wav', 'mp3', 'm4a', 'ogg'], label_visibility="collapsed")
-
-if audio_file:
-    st.audio(audio_file)
-    if st.button("🎯 Process Audio", type="primary"):
-        with st.spinner("🎧 Transcribing..."):
-            transcription = transcribe_audio(audio_file)
+# Voice Recording Option 1: Using audio-recorder-streamlit
+if AUDIO_RECORDER_AVAILABLE:
+    st.markdown("### 🎤 Option 1: Record Your Voice")
+    st.info("🎙️ Click the microphone to start/stop recording")
+    
+    audio_bytes = audio_recorder(
+        text="",
+        recording_color="#e74c3c",
+        neutral_color="#3498db",
+        icon_name="microphone",
+        icon_size="3x",
+    )
+    
+    if audio_bytes and audio_bytes != st.session_state.last_audio_bytes:
+        st.session_state.last_audio_bytes = audio_bytes
+        
+        st.audio(audio_bytes, format="audio/wav")
+        
+        with st.spinner("🎧 Transcribing your audio..."):
+            transcription = transcribe_audio_bytes(audio_bytes)
             
             if transcription:
                 st.markdown(f"**📝 You asked:** *{transcription}*")
-                
-                with st.spinner("🤔 Generating response..."):
-                    response = generate_response(transcription)
-                    
-                    if response:
-                        # Save to history
-                        st.session_state.conversation_history.append({
-                            "question": transcription,
-                            "answer": response
-                        })
-                        
-                        # Show text response
-                        st.markdown("---")
-                        st.markdown("### 💬 Text Response:")
-                        st.success(response)
-                        
-                        # Voice response (auto-play)
-                        st.markdown("### 🔊 Voice Response:")
-                        st.components.v1.html(text_to_speech_html(response, auto_play=True), height=80)
+                process_and_respond(transcription)
+else:
+    st.info("💡 Install `audio-recorder-streamlit` for in-browser recording")
+
+# Voice Recording Option 2: File Upload
+st.markdown("---")
+st.markdown("### 🎤 Option 2: Upload Audio File")
+audio_file = st.file_uploader(
+    "Upload your audio question (WAV, MP3, M4A, OGG)",
+    type=['wav', 'mp3', 'm4a', 'ogg', 'flac'],
+    help="Record using your phone/computer and upload"
+)
+
+if audio_file:
+    st.audio(audio_file)
+    
+    if st.button("🎯 Transcribe & Answer", type="primary"):
+        with st.spinner("🎧 Transcribing..."):
+            transcription = transcribe_audio_file(audio_file)
+            
+            if transcription:
+                st.markdown(f"**📝 You asked:** *{transcription}*")
+                process_and_respond(transcription)
 
 # Text Input
 st.markdown("---")
-st.markdown("### ⌨️ Option 2: Type Your Question")
+st.markdown("### ⌨️ Option 3: Type Your Question")
 text_input = st.text_area(
     "Type here:",
     placeholder="e.g., What's your superpower?",
-    height=80,
-    label_visibility="collapsed"
+    height=100,
+    key="text_input_main"
 )
 
 if st.button("💬 Get Answer", type="primary") and text_input:
-    with st.spinner("🤔 Generating response..."):
-        response = generate_response(text_input)
-        
-        if response:
-            # Save to history
-            st.session_state.conversation_history.append({
-                "question": text_input,
-                "answer": response
-            })
-            
-            # Show text response
-            st.markdown("---")
-            st.markdown("### 💬 Text Response:")
-            st.success(response)
-            
-            # Voice response (auto-play)
-            st.markdown("### 🔊 Voice Response:")
-            st.components.v1.html(text_to_speech_html(response, auto_play=True), height=80)
+    st.markdown(f"**📝 Your question:** *{text_input}*")
+    process_and_respond(text_input)
 
 # ---------------------------
 # Conversation History
 # ---------------------------
 if st.session_state.conversation_history:
     st.markdown("---")
-    st.markdown("## 📜 Conversation History")
+    st.markdown("## 📜 Recent Conversations")
     
     for i, convo in enumerate(reversed(st.session_state.conversation_history[-5:]), 1):
-        with st.expander(f"💬 {convo['question'][:50]}...", expanded=(i==1)):
+        with st.expander(f"💬 Q{len(st.session_state.conversation_history) - i + 1}: {convo['question'][:50]}...", expanded=(i==1)):
             st.markdown(f"**Q:** {convo['question']}")
             st.markdown(f"**A:** {convo['answer']}")
-            st.components.v1.html(text_to_speech_html(convo['answer']), height=80)
+            st.components.v1.html(text_to_speech_html(convo['answer']), height=100)
 
 # Footer
 st.markdown("---")
-st.caption("🚀 Built by Abinesh | Powered by Groq API (Whisper + Llama 3.1)")
+st.caption("🚀 Built by Abinesh Sankaranarayanan | Powered by Groq API (Whisper + Llama 3.1)")
 st.caption("💡 Works best on Chrome/Edge with microphone permission")
